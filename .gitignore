@@ -3,12 +3,13 @@
 session.pkl
 alpha.json
 config.json
+model.json
 
 
 # Project Files
 pnl_chart.png
 simulations/
-system_prompts/
+system_instructions/
 operators/
 
 

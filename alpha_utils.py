@@ -1,73 +1,107 @@
-import os
-import pickle
+import ast
+import json
+from datetime import datetime
 from itertools import groupby
 
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
-from requests.adapters import HTTPAdapter
 from rich.console import Console
-from urllib3.util.retry import Retry
-
-import ace_lib as ace
 
 console = Console()
 
 
-def get_stored_session():
-    brain_session = ace.SingleSession()
+def copy(simulated_alpha):
 
-    retry_strategy = Retry(
-        total=5,  # Retry up to 5 times
-        backoff_factor=1,  # Wait 1s, 2s, 4s... between retries
-        status_forcelist=[429, 500, 502, 503, 504],  # Retry on these errors
-        allowed_methods=[
-            "HEAD",
-            "GET",
-            "OPTIONS",
-            "POST",
-        ],  # Apply to GET (used by check_session_timeout)
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    brain_session.mount("https://", adapter)
-    brain_session.mount("http://", adapter)
+    with open("alpha.json") as f:
+        alpha = json.load(f)
 
-    if os.path.exists("session.pkl"):
-        try:
-            with open("session.pkl", "rb") as f:
-                session_data = pickle.load(f)
+    alpha["type"] = simulated_alpha["type"]
+    alpha["regular"] = simulated_alpha["regular"]["code"]
 
-                brain_session.cookies.update(session_data["cookies"])
-                brain_session.headers.update(session_data["headers"])
+    for key in alpha["settings"].keys() & simulated_alpha["settings"].keys():
+        alpha["settings"][key] = simulated_alpha["settings"][key]
 
-            console.print("Loaded stored session from disk.", style="yellow")
+    return alpha
 
-        except Exception as e:
-            console.print(f"Failed to load session: {e}", style="red")
 
-    time_to_live = ace.check_session_timeout(brain_session)
+def extract_datafields(alpha_expression):
+    # 1. Sanitize: Make the string compatible with Python syntax parser
+    # Replace &&/|| with and/or, and remove trailing semicolons if necessary
+    alpha_expression = alpha_expression.replace("&&", " and ").replace("||", " or ")
 
-    if time_to_live > 2000:
-        console.print(
-            f"Session is valid. Expires in {time_to_live} seconds.", style="yellow"
-        )
-        return brain_session
+    # 2. Parse the code into a tree
+    tree = ast.parse(alpha_expression)
 
-    console.print("Session expired or missing. Logging in...", style="yellow")
-    brain_session = ace.start_session()
+    # 3. Collect identifiers
+    variables = set()
+    assignments = set()
+    operators = set()
 
-    with open("session.pkl", "wb") as f:
-        pickle.dump(
-            {"cookies": brain_session.cookies, "headers": brain_session.headers}, f
-        )
-    console.print("New session saved to disk.", style="yellow")
+    for node in ast.walk(tree):
+        # Detect assignments
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments.add(target.id)
 
-    return brain_session
+        # Detect operators
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                operators.add(node.func.id)
+
+        # Detect all variables
+        elif isinstance(node, ast.Name):
+            variables.add(node.id)
+
+    # 4. Logic: Data Fields = Variables - (Operators + Assignments)
+    datafields = variables - assignments - operators
+
+    return sorted(datafields)
+
+
+def get_insample_context(insample):
+
+    insample_context = []
+
+    checks = insample["checks"]
+
+    ignore = [
+        "checks",
+        "bookSize",
+        "startDate",
+        "investabilityConstrained",
+        "riskNeutralized",
+        "selfCorrelation",
+        "prodCorrelation",
+    ]
+
+    for key in insample:
+        if key in ignore:
+            continue
+
+        insample_context.append(f"{key}: {insample[key]}")
+
+    for check in checks:
+        result = check["result"]
+        name = check["name"]
+
+        if name in ["MATCHES_PYRAMID", "MATCHES_THEMES"]:
+            continue
+        if result in ["PENDING", "PASS"]:
+            continue
+
+        check_string = f"{check["name"]}: {check["result"]}"
+
+        if "limit" in check:
+            check_string += f", limit: {check["limit"]}, value: {check["value"]}"
+
+        insample_context.append(check_string)
+
+    return "\n".join(insample_context)
 
 
 def fix_fastexpr(alpha_expression):
-    alpha_expression = (
-        alpha_expression.replace("\n", "").replace("; ", ";").replace(";", ";\n")
-    )
+    alpha_expression = alpha_expression.replace("; ", ";\n")
 
     alpha_expression = alpha_expression.strip()
     return alpha_expression
@@ -92,148 +126,7 @@ def reverse_fastexpr(alpha_expression):
     return ";\n".join(statements) + ";"
 
 
-def get_check(checks, name):
-
-    for check in checks:
-        if check["name"] == name:
-            return check
-
-    return None
-
-
-def sub_universe_robustness(simulation_result):
-    insample = simulation_result["is"]
-    checks = insample["checks"]
-
-    low_sub_universe_sharpe = get_check(checks, "LOW_SUB_UNIVERSE_SHARPE")
-
-    if low_sub_universe_sharpe is None:
-        return None
-
-    else:
-        is_sub_universe_sharpe = low_sub_universe_sharpe["value"]
-        is_sub_universe_sharpe_limit = low_sub_universe_sharpe["limit"]
-
-    if is_sub_universe_sharpe_limit <= 0 or is_sub_universe_sharpe <= 0:
-        return 0
-
-    return round(0.75 * is_sub_universe_sharpe / is_sub_universe_sharpe_limit, 2)
-
-
-def check_submission(simulation_result):
-    insample = simulation_result["is"]
-    checks = insample["checks"]
-
-    to_check = [
-        "LOW_SHARPE",
-        "LOW_FITNESS",
-        "LOW_TURNOVER",
-        "HIGH_TURNOVER",
-        "CONCENTRATED_WEIGHT",
-        "LOW_SUB_UNIVERSE_SHARPE",
-        "IS_LADDER_SHARPE",
-        "LOW_2Y_SHARPE",
-    ]
-
-    for check in checks:
-        if check["name"] in to_check and check["result"] != "PASS":
-            return False
-
-    return True
-
-
-def get_metrics(simulation_result):
-    insample = simulation_result["is"]
-    checks = insample["checks"]
-
-    warnings = []
-
-    sharpe = insample["sharpe"]
-    sharpe_lb = get_check(checks, "LOW_SHARPE")["limit"]
-
-    ladder_sharpe_check = get_check(checks, "IS_LADDER_SHARPE")
-
-    if ladder_sharpe_check is None:
-        ladder_sharpe_check = get_check(checks, "LOW_2Y_SHARPE")
-
-    ladder_sharpe = ladder_sharpe_check["value"]
-    ladder_sharpe_lb = ladder_sharpe_check["limit"]
-
-    fitness = insample["fitness"]
-    fitness_lb = get_check(checks, "LOW_FITNESS")["limit"]
-
-    turnover = insample["turnover"]
-    turnover_lb = get_check(checks, "LOW_TURNOVER")["limit"]
-    turnover_ub = get_check(checks, "HIGH_TURNOVER")["limit"]
-
-    sur = sub_universe_robustness(simulation_result)
-    sur_lb = 0.75
-
-    weight_concentration = get_check(checks, "CONCENTRATED_WEIGHT")
-    if weight_concentration["result"] == "FAIL":
-        if weight_concentration.get("value"):
-            warnings.append(
-                f"Weight Concentration {round(weight_concentration['value'] * 100, 2)}% is above cutoff of {round(weight_concentration['limit'] * 100, 2)}%."
-            )
-        else:
-            warnings.append(
-                "Weight is too strongly concentrated or too few instruments are assigned weight."
-            )
-    else:
-        warnings.append("Weight is well distributed over instruments.")
-
-    metrics = {
-        "Sharpe": [sharpe, sharpe_lb],
-        "Fitness": [fitness, fitness_lb],
-        "Turnover": [turnover, turnover_lb, turnover_ub],
-        "Sub Universe Robustness": [sur, sur_lb],
-        "Ladder Sharpe": [ladder_sharpe, ladder_sharpe_lb],
-        "WARNINGS": warnings,
-    }
-
-    if sur is None:
-        metrics.pop("Sub Universe Robustness")
-
-    return metrics
-
-
-def get_user_context(simulation_result):
-    metrics = get_metrics(simulation_result)
-    is_submittable = check_submission(simulation_result)
-
-    user_context = []
-
-    for metric in metrics.keys():
-        value = metrics[metric]
-
-        if metric == "WARNINGS":
-            user_context += value
-            break
-
-        txt = f"{metric}: {value[0]}"
-
-        if len(value) == 2:
-            if value[0] < value[1]:
-                txt += f" is less than {value[1]}"
-
-        if len(value) == 3:
-            if value[0] < value[1]:
-                txt += f" is less than {value[1]}"
-
-            if value[0] > value[2]:
-                txt += f" is more than {value[2]}"
-
-        user_context.append(txt)
-
-    if is_submittable:
-        user_context.append("Alpha Expression is Submittable.")
-    else:
-        user_context.append("Alpha Expression is NOT Submittable.")
-
-    return is_submittable, "\n".join(user_context)
-
-
-def pnl_chart(pnl_config, pnl_df):
+def generate_pnl_chart(pnl_config, pnl_data):
 
     def format_y(value, _):
         """Render large values with K/M suffix and preserve sign."""
@@ -252,12 +145,13 @@ def pnl_chart(pnl_config, pnl_df):
             else f"{sign}{val:,.1f}{suffix}"
         )
 
-    plot_df = pnl_df.select_dtypes(include=["number"])
-    dates = plot_df.index.to_pydatetime().tolist()
+    num_series = len(pnl_data[0]) - 1
 
-    series_values = [plot_df[col].values.tolist() for col in plot_df.columns]
+    cols = [list(col) for col in zip(*pnl_data)]
+    dates = [datetime.strptime(d, "%Y-%m-%d") for d in cols[0]]
+    series_values = [list(col) for col in cols[1 : num_series + 1]]
 
-    n_points = len(dates)
+    n_points = len(series_values[0])
     test_len = pnl_config["test"]
     highlight_start = max(0, n_points - test_len)
 
@@ -282,8 +176,8 @@ def pnl_chart(pnl_config, pnl_df):
     positions = [idx_by_date[dt] for dt, _ in filtered_labels]
     labels = [lbl for _, lbl in filtered_labels]
 
-    train_color = pnl_config.get("train_color", "#808080")
-    test_color = pnl_config.get("test_color", "#0000FF")
+    train_color = pnl_config["color"]["train"]
+    test_color = pnl_config["color"]["test"]
 
     fig, ax = plt.subplots(figsize=(10, 5), dpi=500, facecolor="white")
     x_full = range(n_points)
@@ -293,6 +187,7 @@ def pnl_chart(pnl_config, pnl_df):
     ls = "-"
 
     for idx, svals in enumerate(series_values):
+        # First series: split styling (test full, train overlay) — keep existing behavior
         if idx == 0:
             ax.plot(
                 x_full, svals, linewidth=lw, linestyle=ls, color=test_color, alpha=1.0
@@ -306,13 +201,13 @@ def pnl_chart(pnl_config, pnl_df):
                     color=train_color,
                     alpha=1.0,
                 )
-
+        # Second series: use secondary_color for the full graph (no train/test split)
         elif idx == 1:
-            col = pnl_config.get("secondary_color", "#FF0000")
+            col = pnl_config["color"]["secondary"]
             ax.plot(x_full, svals, linewidth=lw, linestyle=ls, color=col, alpha=1.0)
-
+        # Third series (if present): use tertiary_color for the full graph
         elif idx == 2:
-            col = pnl_config.get("tertiary_color", "#00FF00")
+            col = pnl_config["color"]["tertiary"]
             ax.plot(x_full, svals, linewidth=lw, linestyle=ls, color=col, alpha=1.0)
 
     ax.set_xticks(positions)
@@ -327,8 +222,23 @@ def pnl_chart(pnl_config, pnl_df):
     ax.tick_params(axis="y", colors="#7b8292", labelsize=8)
     ax.set_xlim(left=0)
 
-    file_name = pnl_config["file_name"]
-
     plt.tight_layout()
-    plt.savefig(file_name, dpi=500, bbox_inches="tight")
+    plt.savefig(pnl_config["name"], dpi=500, bbox_inches="tight")
     plt.close(fig)
+
+
+def strict_submissibility(checks):
+
+    for check in checks:
+        result = check["result"]
+        name = check["name"]
+
+        if name in ["MATCHES_PYRAMID", "MATCHES_THEMES"]:
+            continue
+        if result in ["PENDING", "PASS"]:
+            continue
+
+        if result in ["FAIL", "WARNING"]:
+            return False
+
+    return True
