@@ -167,6 +167,8 @@ def simulate_single_alpha(
     alpha: dict,
 ) -> dict:
 
+    brain_session = ace.check_session_and_relogin(brain_session)
+
     simulation_response = ace.start_simulation(brain_session, alpha)
     simulation_result = ace.simulation_progress(brain_session, simulation_response)
 

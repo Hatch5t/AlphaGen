@@ -10,16 +10,16 @@ from rich.console import Console
 console = Console()
 
 
-def copy(simulated_alpha):
+def copy(simulation_result):
 
     with open("alpha.json") as f:
         alpha = json.load(f)
 
-    alpha["type"] = simulated_alpha["type"]
-    alpha["regular"] = simulated_alpha["regular"]["code"]
+    alpha["type"] = simulation_result["type"]
+    alpha["regular"] = simulation_result["regular"]["code"]
 
-    for key in alpha["settings"].keys() & simulated_alpha["settings"].keys():
-        alpha["settings"][key] = simulated_alpha["settings"][key]
+    for key in alpha["settings"].keys() & simulation_result["settings"].keys():
+        alpha["settings"][key] = simulation_result["settings"][key]
 
     return alpha
 
@@ -90,7 +90,8 @@ def get_insample_context(insample):
         if result in ["PENDING", "PASS"]:
             continue
 
-        check_string = f"{check["name"]}: {check["result"]}"
+        # check_string = f"{check["name"]}: {check["result"]}"
+        check_string = f"{check["name"]}: FAIL"
 
         if "limit" in check:
             check_string += f", limit: {check["limit"]}, value: {check["value"]}"
@@ -101,7 +102,7 @@ def get_insample_context(insample):
 
 
 def fix_fastexpr(alpha_expression):
-    alpha_expression = alpha_expression.replace("; ", ";\n")
+    alpha_expression = alpha_expression.replace("\n", "").replace("; ", ";").replace(";", ";\n")
 
     alpha_expression = alpha_expression.strip()
     return alpha_expression

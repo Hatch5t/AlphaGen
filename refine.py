@@ -63,6 +63,9 @@ with open("config.json", "r") as f:
 
 
 simulated_alpha = get_simulation_result_json(brain_session, alpha_id)
+pnl = get_alpha_recordset(brain_session, alpha_id, "pnl")
+
+generate_pnl_chart(config["pnl_chart"], pnl)
 datafields = extract_datafields(simulated_alpha["regular"]["code"])
 trial_alpha = copy(simulated_alpha)
 
@@ -89,9 +92,13 @@ if "Group" in config["operators"]:
         ):  # Currency Grouping Field is only available for Delay 1 Alphas
             continue
 
+        if group[0] == "!":
+            continue
+
         system_instruction_datafield += group + ", "
 
 
+console.print("Operator Category:", style="blue")
 system_instruction_operators = "Operators Context:"
 for operator_category in config["operators"]:
     if operator_category[0] == "!":
@@ -101,6 +108,9 @@ for operator_category in config["operators"]:
 
     with open(f"operators/{operator_category}.txt", "r") as f:
         system_instruction_operators += f.read()
+
+    console.print(operator_category, end=", ", style="blue")
+print()
 
 
 system_instruction_warning = "System Warnings:\n"
@@ -196,6 +206,8 @@ def get_model_context(i, model_output):
         lines.append(str(value))
     return "\n".join(lines)
 
+
+print()
 
 console.print(f"Model: {model["model"]}", style="purple")
 console.print(f"Temperature: {model["temperature"]}", style="purple")
